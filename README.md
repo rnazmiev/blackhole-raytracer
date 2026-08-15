@@ -4,6 +4,10 @@ The complete physics behind the video: a Schwarzschild ray tracer in ~360
 lines of NumPy. Every frame in the video was produced by this code — nothing
 was drawn by hand.
 
+**▶ [Play with it in your browser](https://rnazmiev.github.io/blackhole-raytracer/)** —
+the same physics as a WebGL shader: change the distance, cross the horizon,
+look around. No install needed.
+
 One equation does all the work — the shape of a light ray in Schwarzschild
 spacetime (u = 1/r):
 

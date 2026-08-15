@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Black Hole — interactive</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #cfd6de;
+               font: 14px/1.4 Consolas, monospace; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  #panel { position: fixed; top: 14px; left: 14px; background: rgba(8,11,16,.82);
+           border: 1px solid #2a3340; border-radius: 10px; padding: 14px 16px;
+           width: 230px; user-select: none; }
+  #panel h1 { font-size: 14px; margin: 0 0 10px; color: #fff; font-weight: 600; }
+  .row { margin: 8px 0; }
+  .row label { display: flex; justify-content: space-between; margin-bottom: 3px; }
+  .row input[type=range] { width: 100%; }
+  .val { color: #ffd54f; }
+  #readout { margin-top: 10px; padding-top: 8px; border-top: 1px solid #2a3340;
+             white-space: pre; color: #9fb2c5; }
+  #hint { position: fixed; bottom: 12px; left: 14px; color: #5c6b7c; }
+  a { color: #6fb3ff; text-decoration: none; }
+  select { background:#141a22; color:#cfd6de; border:1px solid #2a3340; width:100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <h1>Falling into a black hole</h1>
+  <div class="row"><label>distance r <span class="val" id="vr"></span></label>
+    <input id="r" type="range" min="0" max="1000" value="620"></div>
+  <div class="row"><label>field of view <span class="val" id="vf"></span></label>
+    <input id="f" type="range" min="25" max="140" value="80"></div>
+  <div class="row"><label><span>camera</span></label>
+    <select id="mode">
+      <option value="1" selected>free fall (from infinity)</option>
+      <option value="0">hovering (static)</option>
+    </select></div>
+  <div class="row"><label><span>sky</span></label>
+    <select id="sky">
+      <option value="0" selected>stars</option>
+      <option value="1">grid</option>
+    </select></div>
+  <div id="readout"></div>
+</div>
+<div id="hint">drag to look around · scroll to zoom · <a
+  href="https://github.com/rnazmiev/blackhole-raytracer">code</a></div>
+<div id="lookhint" style="position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+  color:#8fa3b8;background:rgba(8,11,16,.7);padding:10px 16px;border-radius:8px;
+  display:none;pointer-events:none">the hole fills the view ahead — drag to look around</div>
+
+<script>
+"use strict";
+const canvas = document.getElementById("c");
+const gl = canvas.getContext("webgl2", { antialias: false });
+
+const VSRC = `#version 300 es
+in vec2 q; void main(){ gl_Position = vec4(q,0.,1.); }`;
+
+const FSRC = `#version 300 es
+precision highp float;
+out vec4 outColor;
+uniform vec2  res;
+uniform float r0;       // camera radius, M units
+uniform float fovtan;   // tan(fov/2)
+uniform float yaw, pitch;
+uniform int   falling;  // 1 = rain frame, 0 = static hover
+uniform int   skyMode;  // 0 stars, 1 grid
+
+float hash13(vec3 p){ p = fract(p*0.1031); p += dot(p, p.yzx+33.33);
+                      return fract((p.x+p.y)*p.z); }
+
+vec3 stars(vec3 d){
+  vec3 col = vec3(0.004,0.005,0.010);
+  for (float layer = 0.; layer < 2.; layer++){
+    float n = 220. + 160.*layer;
+    vec3 cell = floor(d*n);
+    float h = hash13(cell + layer*17.1);
+    if (h > 0.9985 - 0.0015*layer){
+      vec3 centre = (cell + 0.5)/n;
+      float dist = length(d - normalize(centre));
+      float amp = smoothstep(2.2/n, 0., dist);
+      float tint = hash13(cell + 5.7);
+      col += amp * (0.55+2.4*fract(h*913.7)) *
+             vec3(0.7+0.3*tint, 0.8, 1.0-0.3*tint);
+    }
+  }
+  return col;
+}
+
+vec3 grid(vec3 d){
+  float lat = degrees(asin(clamp(d.z,-1.,1.)));
+  float lon = degrees(atan(d.y, d.x));
+  float dl = abs(mod(lat+5., 10.)-5.);
+  float dn = abs(mod(lon+5., 10.)-5.)*max(cos(radians(lat)),0.05);
+  float i1 = exp(-pow(dl/0.30,2.)), i2 = exp(-pow(dn/0.30,2.));
+  float eq = exp(-pow(abs(lat)/0.75,2.));
+  return vec3(0.010,0.016,0.045) + max(i1,i2)*vec3(0.25,0.75,1.0)
+         + eq*vec3(0.9,0.5,0.18);
+}
+
+void main(){
+  vec2 uv = (2.*gl_FragCoord.xy - res)/res.y;
+  // camera basis: black hole is towards -Z from the camera
+  vec3 dc = normalize(vec3(uv*fovtan, -1.0));
+  float cy = cos(yaw), sy = sin(yaw), cp = cos(pitch), sp = sin(pitch);
+  mat3 Ry = mat3(cy,0.,-sy, 0.,1.,0., sy,0.,cy);
+  mat3 Rx = mat3(1.,0.,0., 0.,cp,sp, 0.,-sp,cp);
+  vec3 d = Ry*(Rx*dc);
+
+  vec3 a = vec3(0.,0.,-1.);                 // towards the hole
+  float cpsi = clamp(dot(d,a), -1., 1.);
+  float spsi = sqrt(max(1.-cpsi*cpsi, 1e-9));
+  vec3 pp = (d - cpsi*a)/spsi;
+
+  float v = (falling==1) ? sqrt(2./r0) : 0.;
+  float u = 1./r0, w, phi = 0.;
+  bool dead = false;
+
+  if (falling==1){
+    float E = 1. - v*cpsi;
+    if (E <= 0.001) dead = true;
+    w = (cpsi - v)/(r0*spsi);
+  } else {
+    float f = 1. - 2./r0;
+    float b = r0*spsi/sqrt(max(f,1e-6));
+    float w2 = 1./(b*b) - u*u*(1.-2.*u);
+    w = sqrt(max(w2, 0.)) * ((cpsi > 0.) ? 1. : -1.);
+  }
+
+  float dphi = 0.045;
+  bool escaped = false;
+  if (!dead){
+    for (int i = 0; i < 240; i++){
+      float k1u=w,            k1w=3.*u*u-u;
+      float u2=u+.5*dphi*k1u, w2m=w+.5*dphi*k1w;
+      float k2u=w2m,          k2w=3.*u2*u2-u2;
+      float u3=u+.5*dphi*k2u, w3=w+.5*dphi*k2w;
+      float k3u=w3,           k3w=3.*u3*u3-u3;
+      float u4=u+dphi*k3u,    w4=w+dphi*k3w;
+      float k4u=w4,           k4w=3.*u4*u4-u4;
+      u += dphi/6.*(k1u+2.*k2u+2.*k3u+k4u);
+      w += dphi/6.*(k1w+2.*k2w+2.*k3w+k4w);
+      phi += dphi;
+      if (w > 0. && u >= 0.5){ dead = true; break; }
+      if (u < 0.002 && w < 0.){ escaped = true; break; }
+      if (u > 2.5){ dead = true; break; }
+    }
+  }
+
+  vec3 col = vec3(0.);
+  if (escaped && !dead){
+    float r = 1./u;
+    float drd = -w*r*r;
+    vec2 dir2 = normalize(vec2(drd*cos(phi)-r*sin(phi),
+                               drd*sin(phi)+r*cos(phi)));
+    vec3 s = dir2.x*(-a) + dir2.y*pp;
+    col = (skyMode==0) ? stars(s) : grid(s);
+    if (falling==1){
+      float D = clamp(1./max(1.-v*cpsi, 0.05), 0.05, 6.);
+      col *= pow(D, 1.2);
+      col.r *= pow(D, -0.9);
+      col.b *= pow(D, 0.9);
+      col = col/(1.+0.25*col);
+    }
+  }
+  // gentle vignette
+  col *= 1. - 0.25*smoothstep(0.6, 1.5, length(uv));
+  outColor = vec4(pow(col, vec3(0.9)), 1.);
+}`;
+
+function compile(type, src){
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VSRC));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FSRC));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+  throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER,
+  new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, "q");
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+const U = n => gl.getUniformLocation(prog, n);
+
+const state = { yaw: 0, pitch: 0, fov: 80, rSlider: 620, falling: 1, sky: 0 };
+
+function rOfSlider(x){          // 0..1000 -> 0.35..50 M, log-ish
+  return 0.35 * Math.pow(50/0.35, x/1000);
+}
+
+function draw(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const wpx = Math.round(innerWidth*dpr), hpx = Math.round(innerHeight*dpr);
+  if (canvas.width !== wpx || canvas.height !== hpx){
+    canvas.width = wpx; canvas.height = hpx;
+    gl.viewport(0, 0, wpx, hpx);
+  }
+  const r0 = rOfSlider(state.rSlider);
+  const hover_ok = r0 > 2.05;
+  const falling = state.falling === 1 || !hover_ok ? 1 : 0;
+  gl.uniform2f(U("res"), wpx, hpx);
+  gl.uniform1f(U("r0"), r0);
+  gl.uniform1f(U("fovtan"), Math.tan(state.fov*Math.PI/360));
+  gl.uniform1f(U("yaw"), state.yaw);
+  gl.uniform1f(U("pitch"), state.pitch);
+  gl.uniform1i(U("falling"), falling);
+  gl.uniform1i(U("skyMode"), state.sky);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  const v = falling ? Math.sqrt(2/r0) : 0;
+  // black-cap angular radius: first root of  r0*sin(p) = sqrt(27)*(1 - v*cos(p))
+  const B = Math.sqrt(27);
+  let lo = v > 1 ? Math.acos(1/v) + 1e-6 : 1e-6, hi = Math.PI - 1e-4;
+  const bof = p => r0*Math.sin(p) - B*(1 - v*Math.cos(p));
+  let cap = lo;
+  if (bof(lo) * bof(hi) < 0 || v <= 1){
+    let a2 = lo, b2 = hi;
+    if (v <= 1){ a2 = 1e-6; b2 = Math.PI/2; }   // exterior static/slow branch
+    for (let i = 0; i < 60; i++){
+      const m = (a2 + b2)/2;
+      if (bof(m) > 0 === bof(a2) > 0) a2 = m; else b2 = m;
+    }
+    cap = (a2 + b2)/2;
+  }
+  const halfDiag = Math.atan(Math.tan(state.fov*Math.PI/360) *
+                   Math.hypot(1, innerWidth/innerHeight));
+  const lookingAtIt = Math.hypot(state.yaw, state.pitch) < cap*0.5;
+  document.getElementById("lookhint").style.display =
+    (cap > halfDiag && lookingAtIt) ? "block" : "none";
+  document.getElementById("vr").textContent = r0.toFixed(2) + " M";
+  document.getElementById("vf").textContent = state.fov + "°";
+  document.getElementById("readout").textContent =
+    "r/Rs = " + (r0/2).toFixed(2) + "\n" +
+    "v    = " + v.toFixed(2) + " c" + (r0 < 2 ? "\ninside the horizon" : "");
+}
+
+const el = id => document.getElementById(id);
+el("r").oninput = e => { state.rSlider = +e.target.value; draw(); };
+el("f").oninput = e => { state.fov = +e.target.value; draw(); };
+el("mode").onchange = e => { state.falling = +e.target.value; draw(); };
+el("sky").onchange = e => { state.sky = +e.target.value; draw(); };
+
+let drag = null;
+canvas.onpointerdown = e => { drag = [e.clientX, e.clientY]; };
+window.onpointerup = () => drag = null;
+window.onpointermove = e => {
+  if (!drag) return;
+  state.yaw   += (e.clientX - drag[0]) * 0.004;
+  state.pitch = Math.max(-1.55, Math.min(1.55,
+                state.pitch + (e.clientY - drag[1]) * 0.004));
+  drag = [e.clientX, e.clientY];
+  draw();
+};
+window.onwheel = e => {
+  state.fov = Math.max(25, Math.min(140, state.fov + Math.sign(e.deltaY)*4));
+  el("f").value = state.fov; draw();
+};
+window.onresize = draw;
+draw();
+</script>
+</body>
+</html>
