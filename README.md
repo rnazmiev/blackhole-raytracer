@@ -1,5 +1,7 @@
 # What You Actually See Falling Into a Black Hole — the code
 
+**🎬 [Watch the video](https://youtu.be/ZuneXkL78HE)**
+
 The complete physics behind the video: a Schwarzschild ray tracer in ~360
 lines of NumPy. Every frame in the video was produced by this code — nothing
 was drawn by hand.
